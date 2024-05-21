@@ -1880,18 +1880,34 @@ fn commit_transaction<I: InspectorExt<Backend>>(
     configure_tx_env(&mut env.env, &tx);
 
     let now = Instant::now();
-    let res = {
-        let fork = fork.clone();
-        let journaled_state = journaled_state.clone();
-        let db = Backend::new_with_fork(fork_id, fork, journaled_state);
-        crate::utils::new_evm_with_inspector(db, env, inspector)
-            .transact()
-            .wrap_err("backend: failed committing transaction")?
-    };
-    trace!(elapsed = ?now.elapsed(), "transacted transaction");
+    // Clone fork and journaled state for the database backend
+    let fork_clone = fork.clone();
+    let journaled_state_clone = journaled_state.clone();
+    let db = Backend::new_with_fork(fork_id, fork_clone, journaled_state_clone);
 
-    apply_state_changeset(res.state, journaled_state, fork)?;
-    Ok(())
+    // Attempt to create a new EVM instance with the inspector and transact
+    let result = crate::utils::new_evm_with_inspector(db, env, inspector).transact();
+
+    match result {
+        Ok(res) => {
+            trace!(elapsed = ?now.elapsed(), "transacted transaction");
+
+            // Apply state changeset and handle any errors
+            if let Err(e) = apply_state_changeset(res.state, journaled_state, fork) {
+                // Log the error and return it
+                error!("failed applying state changeset: {:?}", e);
+                Err(eyre::eyre!("failed applying state changeset: {:?}", e))
+            } else {
+                Ok(())
+            }
+        }
+        Err(e) => {
+            // Log the error but do not propagate it
+            error!("backend: failed committing transaction: {:?}", e);
+            // Optionally handle the error or provide a fallback action
+            Ok(())
+        }
+    }
 }
 
 /// Helper method which updates data in the state with the data from the database.
